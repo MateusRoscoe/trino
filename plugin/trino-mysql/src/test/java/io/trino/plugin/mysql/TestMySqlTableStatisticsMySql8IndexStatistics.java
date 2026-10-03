@@ -13,8 +13,13 @@
  */
 package io.trino.plugin.mysql;
 
+import io.trino.testing.MaterializedResult;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.testing.TestingNames.randomNameSuffix;
+import static java.lang.String.format;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.withinPercentage;
 import static org.junit.jupiter.api.Assumptions.abort;
 
 public class TestMySqlTableStatisticsMySql8IndexStatistics
@@ -30,5 +35,29 @@ public class TestMySqlTableStatisticsMySql8IndexStatistics
     public void testNotAnalyzed()
     {
         abort("MySql8 automatically calculates stats - https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html#sysvar_innodb_stats_auto_recalc");
+    }
+
+    @Test
+    public void testFunctionalIndex()
+    {
+        String tableName = "test_stats_functional_index_" + randomNameSuffix();
+        computeActual(format("CREATE TABLE %s AS SELECT orderkey, custkey FROM tpch.tiny.orders", tableName));
+        try {
+            executeInMysql(format("CREATE INDEX orderkey ON %s (orderkey)", tableName));
+            // INFORMATION_SCHEMA.STATISTICS reports functional key parts with a NULL COLUMN_NAME
+            executeInMysql(format("CREATE INDEX custkey_doubled ON %s ((custkey * 2))", tableName));
+            executeInMysql(format("CREATE INDEX custkey_negated ON %s ((-custkey))", tableName));
+            executeInMysql("ANALYZE TABLE " + tableName);
+
+            MaterializedResult statsResult = computeActual("SHOW STATS FOR " + tableName);
+            assertColumnStats(statsResult, new MapBuilder<String, Integer>()
+                    .put("orderkey", 15000)
+                    .put("custkey", null)
+                    .build());
+            assertThat(getTableCardinalityFromStats(statsResult)).isCloseTo(15000, withinPercentage(20));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
     }
 }
